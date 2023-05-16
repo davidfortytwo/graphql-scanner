@@ -24,11 +24,55 @@ def check_introspection(url):
         if 'data' in response_json and '__schema' in response_json['data']:
             print(colored(f"[!] Introspection is enabled at {url}", "red"))
             print("Evidence:", json.dumps(response_json, indent=4))
+            return True
         else:
             print(colored(f"[-] Introspection is not enabled at {url}", "green"))
+            return False
     except Exception as e:
         print(f"Error during introspection check: {e}")
+        return False
+    
+def check_circular_introspection(url):
+    circular_introspection_query = {
+        'query': '''{
+            __type(name: "Query") {
+                name
+                fields {
+                    name
+                    type {
+                        name
+                        kind
+                        ofType {
+                            name
+                            kind
+                            ofType {
+                                name
+                                kind
+                                ofType {
+                                    name
+                                    kind
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }'''
+    }
 
+    try:
+        response = requests.post(url, json=circular_introspection_query)
+        response.raise_for_status()
+        response_json = response.json()
+
+        if 'data' in response_json and '__type' in response_json['data']:
+            print(colored(f"[!] Circular introspection vulnerability found at {url}", "red"))
+            print("Evidence:", json.dumps(response_json, indent=4))
+        else:
+            print(colored(f"[-] No circular introspection vulnerability found at {url}", "green"))
+    except Exception as e:
+        print(f"Error during circular introspection check: {e}")
+    
 def check_resource_request(url):
     resource_query = {
         'query': '''{
@@ -93,7 +137,9 @@ def check_directive_limit(url):
 # Add more checks here...
 
 def main(target):
-    check_introspection(target)
+    introspection_enabled = check_introspection(target)
+    if introspection_enabled:
+        check_circular_introspection(target)
     check_resource_request(target)
     check_directive_limit(target)
     # Call more checks here...
