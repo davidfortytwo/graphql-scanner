@@ -6,6 +6,7 @@ scan.py is a Python script that checks a GraphQL endpoint for common vulnerabili
 
 Current checks:
 * Introspection 
+* Circular introspection
 * Excessive resource requests
 * Unlimited number of directives
 
