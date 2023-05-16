@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# Author: David Espejo (Fortytwo Security)
 import argparse
 import requests
 import json
