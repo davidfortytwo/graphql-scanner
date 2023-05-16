@@ -38,4 +38,6 @@ The script color codes its output for easy reading:
 - Green: No vulnerability was found.
 - White/Default: Evidence for a found vulnerability.
 
+The typical severity of the vulnerabilities is categorized as Info (green), Low (blue), Medium (orange), High (red) and Critical (violet).
+
 Remember that not all potential vulnerabilities are actual vulnerabilities. Always confirm any findings manually.
