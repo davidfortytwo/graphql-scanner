@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Author: David Espejo (Fortytwo Security)
 import argparse
 import requests
 import json
@@ -22,10 +19,10 @@ def check_introspection(url):
         response_json = response.json()
 
         if 'data' in response_json and '__schema' in response_json['data']:
-            print(colored(f"[!] Introspection is enabled at {url}", "green"))
+            print(colored(f"[!] Introspection is enabled at {url}", "red"))
             print("Evidence:", json.dumps(response_json, indent=4))
         else:
-            print(colored(f"[-] Introspection is not enabled at {url}", "red"))
+            print(colored(f"[-] Introspection is not enabled at {url}", "green"))
     except Exception as e:
         print(f"Error during introspection check: {e}")
 
@@ -54,10 +51,10 @@ def check_resource_request(url):
         response_json = response.json()
 
         if 'data' in response_json and '__type' in response_json['data']:
-            print(colored(f"[!] Excessive resource request vulnerability found at {url}", "green"))
+            print(colored(f"[!] Excessive resource request vulnerability found at {url}", "red"))
             print("Evidence:", json.dumps(response_json, indent=4))
         else:
-            print(colored(f"[-] No excessive resource request vulnerability found at {url}", "red"))
+            print(colored(f"[-] No excessive resource request vulnerability found at {url}", "green"))
     except Exception as e:
         print(f"Error during resource request check: {e}")
 
@@ -83,10 +80,10 @@ def check_directive_limit(url):
         response_json = response.json()
 
         if 'data' in response_json and '__type' in response_json['data']:
-            print(colored(f"[!] Unlimited number of directives vulnerability found at {url}", "green"))
+            print(colored(f"[!] Unlimited number of directives vulnerability found at {url}", "red"))
             print("Evidence:", json.dumps(response_json, indent=4))
         else:
-            print(colored(f"[-] No unlimited number of directives vulnerability found at {url}", "red"))
+            print(colored(f"[-] No unlimited number of directives vulnerability found at {url}", "green"))
     except Exception as e:
         print(f"Error during directive limit check: {e}")
 
