@@ -101,7 +101,7 @@ def check_resource_request(url):
 
         if 'data' in response_json and '__type' in response_json['data']:
             print(colored(f"[!] Excessive resource request vulnerability found at {url}", "red"))
-            print(colored(f"Typical severity: High", "red))
+            print(colored(f"Typical severity: High", "red"))
             print("Evidence:", json.dumps(response_json, indent=4))
         else:
             print(colored(f"[-] No excessive resource request vulnerability found at {url}", "green"))
