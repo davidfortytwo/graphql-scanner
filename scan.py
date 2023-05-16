@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# Author: David Espejo (Fortytwo Security)
+import argparse
+import requests
+import json
+from termcolor import colored
+
+def check_introspection(url):
+    introspection_query = {
+        'query': '''{
+        __schema {
+            types {
+                name
+            }
+        }
+    }'''}
+
+    try:
+        response = requests.post(url, json=introspection_query)
+        response.raise_for_status()
+        response_json = response.json()
+
+        if 'data' in response_json and '__schema' in response_json['data']:
+            print(colored(f"[!] Introspection is enabled at {url}", "green"))
+            print("Evidence:", json.dumps(response_json, indent=4))
+        else:
+            print(colored(f"[-] Introspection is not enabled at {url}", "red"))
+    except Exception as e:
+        print(f"Error during introspection check: {e}")
+
+def check_resource_request(url):
+    resource_query = {
+        'query': '''{
+            __type(name: "User") {
+                name
+                fields {
+                    name
+                    type {
+                        name
+                        kind
+                        ofType {
+                            name
+                            kind
+                        }
+                    }
+                }
+            }
+        }'''}
+
+    try:
+        response = requests.post(url, json=resource_query)
+        response.raise_for_status()
+        response_json = response.json()
+
+        if 'data' in response_json and '__type' in response_json['data']:
+            print(colored(f"[!] Excessive resource request vulnerability found at {url}", "green"))
+            print("Evidence:", json.dumps(response_json, indent=4))
+        else:
+            print(colored(f"[-] No excessive resource request vulnerability found at {url}", "red"))
+    except Exception as e:
+        print(f"Error during resource request check: {e}")
+
+def check_directive_limit(url):
+    directive_query = {
+        'query': '''{
+            __type(name: "Directive") {
+                name
+                locations
+                args {
+                    name
+                    type {
+                        name
+                        kind
+                    }
+                }
+            }
+        }'''}
+
+    try:
+        response = requests.post(url, json=directive_query)
+        response.raise_for_status()
+        response_json = response.json()
+
+        if 'data' in response_json and '__type' in response_json['data']:
+            print(colored(f"[!] Unlimited number of directives vulnerability found at {url}", "green"))
+            print("Evidence:", json.dumps(response_json, indent=4))
+        else:
+            print(colored(f"[-] No unlimited number of directives vulnerability found at {url}", "red"))
+    except Exception as e:
+        print(f"Error during directive limit check: {e}")
+
+# Add more checks here...
+
+def main(target):
+    check_introspection(target)
+    check_resource_request(target)
+    check_directive_limit(target)
+    # Call more checks here...
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Check GraphQL endpoint for common vulnerabilities.")
+    parser.add_argument('-t', '--target', type=str, required=True, help="Target GraphQL endpoint.")
+    args = parser.parse_args()
+    main(args.target)
