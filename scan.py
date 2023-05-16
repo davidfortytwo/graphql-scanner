@@ -23,6 +23,7 @@ def check_introspection(url):
 
         if 'data' in response_json and '__schema' in response_json['data']:
             print(colored(f"[!] Introspection is enabled at {url}", "red"))
+            print(colored(f"Typical severity: Low", "blue"))
             print("Evidence:", json.dumps(response_json, indent=4))
             return True
         else:
@@ -67,6 +68,7 @@ def check_circular_introspection(url):
 
         if 'data' in response_json and '__type' in response_json['data']:
             print(colored(f"[!] Circular introspection vulnerability found at {url}", "red"))
+            print(colored(f"Typical severity: High", "red"))
             print("Evidence:", json.dumps(response_json, indent=4))
         else:
             print(colored(f"[-] No circular introspection vulnerability found at {url}", "green"))
@@ -99,6 +101,7 @@ def check_resource_request(url):
 
         if 'data' in response_json and '__type' in response_json['data']:
             print(colored(f"[!] Excessive resource request vulnerability found at {url}", "red"))
+            print(colored(f"Typical severity: High", "red))
             print("Evidence:", json.dumps(response_json, indent=4))
         else:
             print(colored(f"[-] No excessive resource request vulnerability found at {url}", "green"))
@@ -128,6 +131,7 @@ def check_directive_limit(url):
 
         if 'data' in response_json and '__type' in response_json['data']:
             print(colored(f"[!] Unlimited number of directives vulnerability found at {url}", "red"))
+            print(colored(f"Typical severity: Low", "blue"))              
             print("Evidence:", json.dumps(response_json, indent=4))
         else:
             print(colored(f"[-] No unlimited number of directives vulnerability found at {url}", "green"))
