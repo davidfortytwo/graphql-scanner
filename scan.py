@@ -5,6 +5,7 @@ import argparse
 import requests
 import json
 from termcolor import colored
+import logging
 
 def check_introspection(url):
     introspection_query = {
@@ -236,5 +237,6 @@ def main(target):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Check GraphQL endpoint for common vulnerabilities.")
     parser.add_argument('-t', '--target', type=str, required=True, help="Target GraphQL endpoint.")
+    parser.add_argument('-l', '--log', type=str, help="Log file to write results to.")
     args = parser.parse_args()
     main(args.target)
