@@ -26,6 +26,10 @@ def check_introspection(url):
             print(colored(f"[!] Introspection is enabled at {url}", "red"))
             print(colored(f"Typical severity: Low", "blue"))
             print("Evidence:", json.dumps(response_json, indent=4))
+            logging.info(colored(f"[!] Introspection is enabled at {url}", "red"))
+            logging.info(colored(f"Typical severity: Low", "blue"))
+            logging.info("Evidence:", json.dumps(response_json, indent=4))
+
             return True
         else:
             print(colored(f"[-] Introspection is not enabled at {url}", "green"))
@@ -71,6 +75,9 @@ def check_circular_introspection(url):
             print(colored(f"[!] Circular introspection vulnerability found at {url}", "red"))
             print(colored(f"Typical severity: High", "red"))
             print("Evidence:", json.dumps(response_json, indent=4))
+            logging.info(colored(f"[!] Circular introspection vulnerability found at {url}", "red"))
+            logging.info(colored(f"Typical severity: High", "red"))
+            logging.info("Evidence:", json.dumps(response_json, indent=4))
         else:
             print(colored(f"[-] No circular introspection vulnerability found at {url}", "green"))
     except Exception as e:
@@ -104,6 +111,9 @@ def check_resource_request(url):
             print(colored(f"[!] Excessive resource request vulnerability found at {url}", "red"))
             print(colored(f"Typical severity: High", "red"))
             print("Evidence:", json.dumps(response_json, indent=4))
+            logging.info(colored(f"[!] Excessive resource request vulnerability found at {url}", "red"))
+            logging.info(colored(f"Typical severity: High", "red"))
+            logging.info("Evidence:", json.dumps(response_json, indent=4))            
         else:
             print(colored(f"[-] No excessive resource request vulnerability found at {url}", "green"))
     except Exception as e:
@@ -186,6 +196,9 @@ def check_zombie_objects(url):
                 print(colored(f"[!] Zombie objects found at {url}", "red"))
                 print(colored(f"Typical severity: High", "red"))
                 print("Zombie objects:", ', '.join(zombie_objects))
+                logging.info(colored(f"[!] Zombie objects found at {url}", "red"))
+                logging.info(colored(f"Typical severity: High", "red"))
+                logging.info("Zombie objects:", ', '.join(zombie_objects))                
             else:
                 print(colored(f"[-] No zombie objects found at {url}", "green"))
         else:
@@ -218,6 +231,9 @@ def check_directive_limit(url):
             print(colored(f"[!] Unlimited number of directives vulnerability found at {url}", "red"))
             print(colored(f"Typical severity: Low", "blue"))              
             print("Evidence:", json.dumps(response_json, indent=4))
+            logging.info(colored(f"[!] Unlimited number of directives vulnerability found at {url}", "red"))
+            logging.info(colored(f"Typical severity: Low", "blue"))              
+            logging.info("Evidence:", json.dumps(response_json, indent=4))            
         else:
             print(colored(f"[-] No unlimited number of directives vulnerability found at {url}", "green"))
     except Exception as e:
@@ -225,7 +241,11 @@ def check_directive_limit(url):
 
 # Add more checks here...
 
-def main(target):
+def main(target, log_file):
+    if log_file:
+        logging.basicConfig(filename=log_file, level=logging.INFO, format='%(message)s')
+    else:
+        logging.basicConfig(level=logging.INFO, format='%(message)s')
     introspection_enabled = check_introspection(target)
     if introspection_enabled:
         check_circular_introspection(target)
