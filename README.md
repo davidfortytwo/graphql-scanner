@@ -9,6 +9,8 @@ Current checks:
 * Circular introspection
 * Excessive resource requests
 * Unlimited number of directives
+* Deeply Nested Queries
+* Batch Requests
 
 Other checks will be added.
 
