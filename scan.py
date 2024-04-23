@@ -5,7 +5,20 @@ import argparse
 import requests
 import json
 from termcolor import colored
-import logging
+
+def send_query(url, query):
+    headers = {'Content-Type': 'application/json'}
+    try:
+        response = requests.post(url, json=query, headers=headers, timeout=10)
+        response.raise_for_status()
+        if 'application/json' in response.headers.get('Content-Type', ''):
+            return response.json()
+        else:
+            print(colored(f"[!] Unexpected Content-Type received from {url}", "yellow"))
+            return None
+    except requests.exceptions.RequestException as e:
+        print(colored(f"[!] HTTP error occurred: {e}", "red"))
+        return None
 
 def check_introspection(url):
     introspection_query = {
@@ -16,25 +29,16 @@ def check_introspection(url):
             }
         }
     }'''}
-
-    try:
-        response = requests.post(url, json=introspection_query)
-        response.raise_for_status()
-        response_json = response.json()
-
-        if 'data' in response_json and '__schema' in response_json['data']:
-            logging.info(colored(f"[!] Introspection is enabled at {url}", "red"))
-            logging.info(colored(f"Typical severity: Low", "blue"))
-            logging.info("Evidence:", json.dumps(response_json, indent=4))
-
-            return True
-        else:
-            print(colored(f"[-] Introspection is not enabled at {url}", "green"))
-            return False
-    except Exception as e:
-        print(f"Error during introspection check: {e}")
+    response_json = send_query(url, introspection_query)
+    if response_json and 'data' in response_json and '__schema' in response_json['data']:
+        print(colored(f"[!] Introspection is enabled at {url}", "red"))
+        print(colored(f"Typical severity: Low", "blue"))
+        print("Evidence:", json.dumps(response_json, indent=4))
+        return True
+    else:
+        print(colored(f"[-] Introspection is not enabled at {url}", "green"))
         return False
-    
+
 def check_circular_introspection(url):
     circular_introspection_query = {
         'query': '''{
@@ -62,21 +66,14 @@ def check_circular_introspection(url):
             }
         }'''
     }
+    response_json = send_query(url, circular_introspection_query)
+    if response_json and 'data' in response_json and '__type' in response_json['data']:
+        print(colored(f"[!] Circular introspection vulnerability found at {url}", "red"))
+        print(colored(f"Typical severity: High", "red"))
+        print("Evidence:", json.dumps(response_json, indent=4))
+    else:
+        print(colored(f"[-] No circular introspection vulnerability found at {url}", "green"))
 
-    try:
-        response = requests.post(url, json=circular_introspection_query)
-        response.raise_for_status()
-        response_json = response.json()
-
-        if 'data' in response_json and '__type' in response_json['data']:
-            logging.info(colored(f"[!] Circular introspection vulnerability found at {url}", "red"))
-            logging.info(colored(f"Typical severity: High", "red"))
-            logging.info("Evidence:", json.dumps(response_json, indent=4))
-        else:
-            print(colored(f"[-] No circular introspection vulnerability found at {url}", "green"))
-    except Exception as e:
-        print(f"Error during circular introspection check: {e}")
-    
 def check_resource_request(url):
     resource_query = {
         'query': '''{
@@ -95,104 +92,13 @@ def check_resource_request(url):
                 }
             }
         }'''}
-
-    try:
-        response = requests.post(url, json=resource_query)
-        response.raise_for_status()
-        response_json = response.json()
-
-        if 'data' in response_json and '__type' in response_json['data']:
-            logging.info(colored(f"[!] Excessive resource request vulnerability found at {url}", "red"))
-            logging.info(colored(f"Typical severity: High", "red"))
-            logging.info("Evidence:", json.dumps(response_json, indent=4))            
-        else:
-            print(colored(f"[-] No excessive resource request vulnerability found at {url}", "green"))
-    except Exception as e:
-        print(f"Error during resource request check: {e}")
-        
-def check_zombie_objects(url):
-    introspection_query = {
-        'query': '''{
-        __schema {
-            types {
-                name
-                fields {
-                    name
-                    type {
-                        name
-                        kind
-                        ofType {
-                            name
-                            kind
-                        }
-                    }
-                }
-            }
-            queryType {
-                fields {
-                    name
-                    type {
-                        name
-                        kind
-                        ofType {
-                            name
-                            kind
-                        }
-                    }
-                }
-            }
-            mutationType {
-                fields {
-                    name
-                    type {
-                        name
-                        kind
-                        ofType {
-                            name
-                            kind
-                        }
-                    }
-                }
-            }
-            subscriptionType {
-                fields {
-                    name
-                    type {
-                        name
-                        kind
-                        ofType {
-                            name
-                            kind
-                        }
-                    }
-                }
-            }
-        }
-    }'''}
-
-    try:
-        response = requests.post(url, json=introspection_query)
-        response.raise_for_status()
-        response_json = response.json()
-
-        if 'data' in response_json and '__schema' in response_json['data']:
-            types = set(type['name'] for type in response_json['data']['__schema']['types'])
-            query_types = set(field['type']['name'] for field in response_json['data']['__schema']['queryType']['fields'])
-            mutation_types = set(field['type']['name'] for field in response_json['data']['__schema']['mutationType']['fields'])
-            subscription_types = set(field['type']['name'] for field in response_json['data']['__schema']['subscriptionType']['fields'])
-
-            zombie_objects = types - query_types - mutation_types - subscription_types
-
-            if zombie_objects:
-                logging.info(colored(f"[!] Zombie objects found at {url}", "red"))
-                logging.info(colored(f"Typical severity: High", "red"))
-                logging.info("Zombie objects:", ', '.join(zombie_objects))                
-            else:
-                print(colored(f"[-] No zombie objects found at {url}", "green"))
-        else:
-            print(colored(f"[-] Introspection is not enabled at {url}", "green"))
-    except Exception as e:
-        print(f"Error during zombie objects check: {e}")        
+    response_json = send_query(url, resource_query)
+    if response_json and 'data' in response_json and '__type' in response_json['data']:
+        print(colored(f"[!] Excessive resource request vulnerability found at {url}", "red"))
+        print(colored(f"Typical severity: High", "red"))
+        print("Evidence:", json.dumps(response_json, indent=4))
+    else:
+        print(colored(f"[-] No excessive resource request vulnerability found at {url}", "green"))
 
 def check_directive_limit(url):
     directive_query = {
@@ -209,39 +115,43 @@ def check_directive_limit(url):
                 }
             }
         }'''}
-
-    try:
-        response = requests.post(url, json=directive_query)
-        response.raise_for_status()
-        response_json = response.json()
-
-        if 'data' in response_json and '__type' in response_json['data']:
-            logging.info(colored(f"[!] Unlimited number of directives vulnerability found at {url}", "red"))
-            logging.info(colored(f"Typical severity: Low", "blue"))              
-            logging.info("Evidence:", json.dumps(response_json, indent=4))            
-        else:
-            print(colored(f"[-] No unlimited number of directives vulnerability found at {url}", "green"))
-    except Exception as e:
-        print(f"Error during directive limit check: {e}")
-
-# Add more checks here...
-
-def main(target, log_file):
-    if log_file:
-        logging.basicConfig(filename=log_file, level=logging.INFO, format='%(message)s')
+    response_json = send_query(url, directive_query)
+    if response_json and 'data' in response_json and '__type' in response_json['data']:
+        print(colored(f"[!] Unlimited number of directives vulnerability found at {url}", "red"))
+        print(colored(f"Typical severity: Low", "blue"))
+        print("Evidence:", json.dumps(response_json, indent=4))
     else:
-        logging.basicConfig(level=logging.INFO, format='%(message)s')
-    introspection_enabled = check_introspection(target)
-    if introspection_enabled:
+        print(colored(f"[-] No unlimited number of directives vulnerability found at {url}", "green"))
+
+def check_deeply_nested_query(url):
+    deeply_nested_query = {
+        'query': '{ a1: __schema { queryType { name, fields { name, type { name, fields { name, type { name } } } } } } }'
+    }
+    response_json = send_query(url, deeply_nested_query)
+    if response_json and 'data' in response_json:
+        print(colored(f"[!] Server responds to deeply nested queries at {url}. Possible DoS vulnerability.", "red"))
+    else:
+        print(colored(f"[-] No issues with deeply nested queries found at {url}.", "green"))
+
+def check_batch_requests(url):
+    batch_query = [{'query': '{ __schema { types { name } } }'}] * 10  # Adjust the batch size as needed
+    response_json = send_query(url, batch_query)
+    if response_json:
+        print(colored(f"[!] Server allows batch requests at {url}. May lead to DoS if abused.", "red"))
+    else:
+        print(colored(f"[-] No batch request vulnerability found at {url}.", "green"))
+
+def main(target):
+    print("Starting checks for GraphQL endpoint at:", target)
+    if check_introspection(target):
         check_circular_introspection(target)
-        check_zombie_objects(target)
+        check_deeply_nested_query(target)
+        check_batch_requests(target)
     check_resource_request(target)
     check_directive_limit(target)
-    # Call more checks here...
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Check GraphQL endpoint for common vulnerabilities.")
     parser.add_argument('-t', '--target', type=str, required=True, help="Target GraphQL endpoint.")
-    parser.add_argument('-l', '--log', type=str, help="Log file to write results to.")
     args = parser.parse_args()
     main(args.target)
