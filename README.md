@@ -8,9 +8,12 @@ This scanner supports:
 
     - ✅ **Safe mode** to avoid DoS risks
     - 💤 **Request throttling**
-    - 🐞 **Verbose debug logging**
     - 🗂️ **Automatic report generation** (timestamped `.txt` file)
     - 🔐 **Support for session cookies and Bearer tokens**
+    - 🧠 **Schema analysis with field classification and depth estimation**
+    - 🚨 **Sensitive field detection and live data resolution**
+    - 📊 **Schema coverage report with field/complexity metrics**
+    - 💬 **Verbose mode for debugging responses and headers**
 
 > **⚠️ Disclaimer**: This tool must only be used against systems for which you have **explicit permission**. Unauthorized use is strictly prohibited and may be illegal. Always respect target system policies, and follow responsible disclosure guidelines.
 
@@ -18,18 +21,22 @@ This scanner supports:
 
 ## Current Checks
 
-- ✅ Introspection
-- ✅ Circular Introspection
-- ✅ Deeply Nested Query *(optional, skipped in `--safe-mode`)*
-- ✅ Batch Requests *(optional, skipped in `--safe-mode`)*
-- ✅ Excessive Resource Requests
-- ✅ Unlimited Number of Directives
-- ✅ Error-Based Enumeration (e.g., suggestion leakage)
-- ✅ Authorization Bypass (type-level)
-- ✅ Field Suggestion Leakage
-- ✅ Rate Limiting Test *(optional, skipped in `--safe-mode`)*
-- ✅ Fake Type Discovery (e.g., `Token`, `Session`, `SecretUser`)
-- ✅ Sensitive Field Leak (e.g., `token`, `password` in `User` type)
+- ✅ **Introspection Exposure** (`__schema`)
+- ✅ **Circular Introspection Abuse** (`__type(name: "Query")`)
+- ✅ **Deeply Nested Query Handling** *(optional, skipped in `--safe-mode`)*
+- ✅ **Batch Query Processing** *(optional, skipped in `--safe-mode`)*
+- ✅ **Excessive Resource Exposure** (`__type(name: "User")`) with:
+  - Field type classification (SCALAR, LIST, OBJECT, etc.)
+  - Sensitive field heuristics (`token`, `password`, etc.)
+  - Depth estimation
+- ✅ **Unlimited Directives Enumeration**
+- ✅ **Error-Based Enumeration** (e.g., "Did you mean")
+- ✅ **Authorization Bypass Detection** (with auth context awareness)
+- ✅ **Field Suggestion Leakage**
+- ✅ **Rate Limiting Behavior Test** *(optional, skipped in `--safe-mode`)*
+- ✅ **Fake/Hidden Type Discovery** (e.g., `Token`, `Session`, `SecretUser`)
+- ✅ **Sensitive Field Resolver** — tests if sensitive fields return real data
+- ✅ **Schema Coverage Summary** — field count, depth, exposure
 
 ---
 
@@ -84,12 +91,12 @@ A full report is saved to a file: graphql_scan_report_<timestamp>.txt.
 
 Color Coding:
 
-Color	Meaning
+    🔴 Red	Confirmed vulnerability or sensitive result
+    🟢 Green	No issue / resolved / blocked
+    🔵 Blue	Informational or warning
+    ⚪ White	Evidence, data dump, or debug info
+    🟠 Orange	(Planned for future use — Medium/Caution)
 
-    🔴 Red	High/critical issue or clear misconfiguration
-    🟢 Green	No vulnerability found
-    🔵 Blue	Informational or low severity
-    ⚪ White	Evidence, data dumps, verbose messages
 
 Severity Levels:
 
