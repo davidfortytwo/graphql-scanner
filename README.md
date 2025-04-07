@@ -4,7 +4,13 @@
 
 `scan.py` is a Python script that checks a GraphQL endpoint for common vulnerabilities, including introspection, schema misconfigurations, and denial-of-service (DoS)-related issues. It is designed for **educational and authorized security testing only**.
 
-This scanner supports **safe-mode**, **request throttling**, **verbose debug logging**, and generates a **timestamped report file** for offline analysis.
+This scanner supports:
+
+    - ✅ **Safe mode** to avoid DoS risks
+    - 💤 **Request throttling**
+    - 🐞 **Verbose debug logging**
+    - 🗂️ **Automatic report generation** (timestamped `.txt` file)
+    - 🔐 **Support for session cookies and Bearer tokens**
 
 > **⚠️ Disclaimer**: This tool must only be used against systems for which you have **explicit permission**. Unauthorized use is strictly prohibited and may be illegal. Always respect target system policies, and follow responsible disclosure guidelines.
 
@@ -14,26 +20,18 @@ This scanner supports **safe-mode**, **request throttling**, **verbose debug log
 
 - ✅ Introspection
 - ✅ Circular Introspection
-- ✅ Deeply Nested Query (optional, skipped in `--safe-mode`)
-- ✅ Batch Requests (optional, skipped in `--safe-mode`)
+- ✅ Deeply Nested Query *(optional, skipped in `--safe-mode`)*
+- ✅ Batch Requests *(optional, skipped in `--safe-mode`)*
 - ✅ Excessive Resource Requests
 - ✅ Unlimited Number of Directives
 - ✅ Error-Based Enumeration (e.g., suggestion leakage)
 - ✅ Authorization Bypass (type-level)
 - ✅ Field Suggestion Leakage
-- ✅ Rate Limiting Test (optional, skipped in `--safe-mode`)
+- ✅ Rate Limiting Test *(optional, skipped in `--safe-mode`)*
 - ✅ Fake Type Discovery (e.g., `Token`, `Session`, `SecretUser`)
 - ✅ Sensitive Field Leak (e.g., `token`, `password` in `User` type)
 
 ---
-
-## Installation
-
-Clone the repository:
-
-
-    git clone https://github.com/davidfortytwo/graphql-scanner
-    cd graphql-scanner
 
 
 # Installation 
@@ -60,10 +58,24 @@ Optional Flags:
     --safe-mode	Avoids checks that could cause server stress (deep nesting, batch, rate limit tests).
     --throttle <sec>	Set delay (in seconds) between each request. Default is 0.5.
     --verbose	Enables debug output, useful for troubleshooting.
+    --cookie "<val>"	Include a session cookie (e.g., 'sessionid=abc123; other=value')
+    --bearer <token>	Set a Bearer token for Authorization header
 
 Example:
 
+Run a safe-mode scan with a throttle and debug output:
+
     python3 scan.py -t http://example.com/graphql --safe-mode --throttle 1.0 --verbose
+
+Run authenticated with a session cookie:
+
+    python scan.py -t https://example.com/graphql --cookie "sessionid=abc123"
+
+Run with a Bearer token:
+
+    python scan.py -t https://example.com/graphql --bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+
+
 
 # Output
 
