@@ -74,21 +74,17 @@ def classify_fields(fields):
     for f in fields:
         fname = f.get("name", "")
         ftype = f.get("type", {})
-        kind = ftype.get("kind")
-        name = ftype.get("name")
-        oftype = ftype.get("ofType")
 
-        # Detect sensitive by name
+        # Check for sensitive name
         if any(keyword in fname.lower() for keyword in sensitive_keywords):
             classified["SENSITIVE"].append(fname)
 
         # Unwrap nested types
-        while oftype:
-            kind = oftype.get("kind")
-            name = oftype.get("name")
-            oftype = oftype.get("ofType")
+        while ftype.get("ofType"):
+            ftype = ftype["ofType"]
 
-        classified[kind or "UNKNOWN"] += 1
+        kind = ftype.get("kind", "UNKNOWN")
+        classified[kind] = classified.get(kind, 0) + 1
     return classified
 
 def estimate_depth(ftype, level=1):
@@ -210,7 +206,144 @@ def run_all_checks(target, safe_mode):
 
     summarize_schema_coverage()
 
-# Reusa check_introspection() y otras si ya las tienes. Solo omitir si ya están integradas en tu versión actual.
+def check_introspection(url):
+    query = {'query': '{ __schema { types { name } } }'}
+    response_json = send_query(url, query)
+
+    if not isinstance(response_json, dict):
+        log(colored("[!] No response or invalid JSON received for introspection query.", "yellow"))
+        return False
+
+    data = response_json.get("data")
+    if isinstance(data, dict) and "__schema" in data:
+        log(colored(f"[!] Introspection is enabled at {url}", "red"))
+        log(colored("Typical severity: Low", "blue"))
+        log("Evidence:\n" + json.dumps(response_json, indent=4))
+        return True
+    else:
+        log(colored(f"[-] Introspection is not enabled at {url}", "green"))
+        return False
+
+def check_circular_introspection(url):
+    query = {'query': '''{ __type(name: "Query") {
+        name fields { name type {
+            name kind ofType {
+                name kind ofType {
+                    name kind ofType {
+                        name kind } } } } } } }'''}
+    response_json = send_query(url, query)
+
+    if not isinstance(response_json, dict):
+        log(colored("[!] No response or invalid JSON for circular introspection.", "yellow"))
+        return
+
+    data = response_json.get("data")
+    if isinstance(data, dict) and '__type' in data:
+        log(colored(f"[!] Circular introspection vulnerability found at {url}", "red"))
+        log(colored("Typical severity: High", "red"))
+        log("Evidence:\n" + json.dumps(response_json, indent=4))
+    else:
+        log(colored(f"[-] No circular introspection vulnerability found at {url}", "green"))
+
+def check_deeply_nested_query(url):
+    query = {'query': '{ a1: __schema { queryType { name, fields { name, type { name, fields { name, type { name } } } } } } }'}
+    response_json = send_query(url, query)
+    if not isinstance(response_json, dict):
+        log(colored("[!] No response or invalid JSON for deeply nested query.", "yellow"))
+        return
+    if 'data' in response_json:
+        log(colored(f"[!] Server responds to deeply nested queries at {url}. Possible DoS vulnerability.", "red"))
+    else:
+        log(colored(f"[-] No issues with deeply nested queries found at {url}.", "green"))
+
+def check_deeply_nested_query(url):
+    query = {'query': '{ a1: __schema { queryType { name, fields { name, type { name, fields { name, type { name } } } } } } }'}
+    response_json = send_query(url, query)
+    if not isinstance(response_json, dict):
+        log(colored("[!] No response or invalid JSON for deeply nested query.", "yellow"))
+        return
+    if 'data' in response_json:
+        log(colored(f"[!] Server responds to deeply nested queries at {url}. Possible DoS vulnerability.", "red"))
+    else:
+        log(colored(f"[-] No issues with deeply nested queries found at {url}.", "green"))
+
+
+def check_directive_limit(url):
+    query = {'query': '{ __type(name: "Directive") { name locations args { name type { name kind } } } }'}
+    response_json = send_query(url, query)
+    if not isinstance(response_json, dict):
+        log(colored("[!] No response or invalid JSON for directive check.", "yellow"))
+        return
+    if 'data' in response_json and '__type' in response_json['data']:
+        log(colored(f"[!] Unlimited number of directives vulnerability found at {url}", "red"))
+        log(colored("Typical severity: Low", "blue"))
+        log("Evidence:\n" + json.dumps(response_json, indent=4))
+    else:
+        log(colored(f"[-] No unlimited number of directives vulnerability found at {url}", "green"))
+
+def check_batch_requests(url):
+    batch_query = [{'query': '{ __schema { types { name } } }'}] * 10
+    response_json = send_query(url, batch_query)
+    if not isinstance(response_json, list):
+        log(colored("[!] No response or invalid JSON for batch request.", "yellow"))
+        return
+    log(colored(f"[!] Server allows batch requests at {url}. May lead to DoS if abused.", "red"))
+
+def check_error_based_enumeration(url):
+    query = {'query': '{ thisDoesNotExist }'}
+    response_json = send_query(url, query)
+    if not isinstance(response_json, dict):
+        log(colored("[!] No response or invalid JSON for error enumeration.", "yellow"))
+        return
+    errors = response_json.get("errors", [])
+    suggestions = [e['message'] for e in errors if 'Did you mean' in e.get('message', '') or 'Cannot query field' in e.get('message', '')]
+    if suggestions:
+        log(colored(f"[!] Verbose error messages detected at {url}", "red"))
+        log(colored("Typical severity: Medium", "blue"))
+        log("Evidence:\n" + json.dumps(errors, indent=4))
+    else:
+        log(colored(f"[-] Error messages are not verbose at {url}", "green"))
+
+def check_field_suggestion(url):
+    query = {'query': '{ useer { id } }'}
+    response_json = send_query(url, query)
+    if not isinstance(response_json, dict):
+        log(colored("[!] No response or invalid JSON for field suggestion check.", "yellow"))
+        return
+    errors = response_json.get("errors", [])
+    suggestions = [e['message'] for e in errors if 'Did you mean' in e.get('message', '')]
+    if suggestions:
+        log(colored(f"[!] Field suggestion leak detected at {url}", "red"))
+        log(colored("Typical severity: Medium", "blue"))
+        for s in suggestions:
+            log(s)
+    else:
+        log(colored(f"[-] No suggestion-based leakage at {url}", "green"))
+
+def check_rate_limiting(url):
+    query = {'query': '{ __schema { types { name } } }'}
+    codes = []
+    for _ in range(5):
+        try:
+            resp = requests.post(url, json=query, headers=custom_headers)
+            codes.append(resp.status_code)
+            time.sleep(0.3)
+        except Exception as e:
+            log(f"[!] Rate check error: {e}")
+    if 429 in codes or any(c == 403 for c in codes):
+        log(colored(f"[!] Possible rate limiting detected at {url}", "yellow"))
+        log(f"Status Codes: {codes}")
+    else:
+        log(colored(f"[-] No rate limiting detected at {url}", "green"))
+
+def check_fake_type_discovery(url):
+    for typename in ["Token", "Session", "PrivateData", "SecretUser"]:
+        query = {'query': f'{{ __type(name: "{typename}") {{ name }} }}'}
+        response_json = send_query(url, query)
+        if not isinstance(response_json, dict):
+            continue
+        if response_json.get('data', {}).get('__type'):
+            log(colored(f"[!] Discovered undocumented type '{typename}' at {url}", "red"))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="GraphQL Security Scanner - Enhanced Version")
