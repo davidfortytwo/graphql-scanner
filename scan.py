@@ -272,11 +272,17 @@ def check_token_field_leak(url):
 
 def run_all_checks(target, safe_mode):
     log(f"Scanning target: {target}")
+
+    # Introspection and related
     if check_introspection(target):
         check_circular_introspection(target)
         if not safe_mode:
             check_deeply_nested_query(target)
             check_batch_requests(target)
+    else:
+        log(colored("[*] Skipping circular/deep/batch checks due to introspection being disabled", "yellow"))
+
+    # Independent checks
     check_resource_request(target)
     check_directive_limit(target)
     check_error_based_enumeration(target)
@@ -286,6 +292,7 @@ def run_all_checks(target, safe_mode):
         check_rate_limiting(target)
     check_fake_type_discovery(target)
     check_token_field_leak(target)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="GraphQL Security Scanner")
