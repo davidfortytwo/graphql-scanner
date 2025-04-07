@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Enhanced GraphQL Scanner with authentication, safety and error handling
+# GraphQL Scanner by David Espejo + Enhanced by Techno Guardian
 
 import argparse
 import requests
@@ -71,10 +71,13 @@ def send_query(url, query):
 def check_introspection(url):
     query = {'query': '{ __schema { types { name } } }'}
     response_json = send_query(url, query)
-    if not response_json:
+
+    if not isinstance(response_json, dict):
         log(colored("[!] No response or invalid JSON received for introspection query.", "yellow"))
         return False
-    if 'data' in response_json and '__schema' in response_json['data']:
+
+    data = response_json.get("data")
+    if isinstance(data, dict) and "__schema" in data:
         log(colored(f"[!] Introspection is enabled at {url}", "red"))
         log(colored("Typical severity: Low", "blue"))
         log("Evidence:\n" + json.dumps(response_json, indent=4))
@@ -84,37 +87,20 @@ def check_introspection(url):
         return False
 
 def check_circular_introspection(url):
-    query = {
-        'query': '''{
-            __type(name: "Query") {
-                name
-                fields {
-                    name
-                    type {
-                        name
-                        kind
-                        ofType {
-                            name
-                            kind
-                            ofType {
-                                name
-                                kind
-                                ofType {
-                                    name
-                                    kind
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }'''
-    }
+    query = {'query': '''{ __type(name: "Query") {
+        name fields { name type {
+            name kind ofType {
+                name kind ofType {
+                    name kind ofType {
+                        name kind } } } } } } }'''}
     response_json = send_query(url, query)
-    if not response_json:
-        log(colored("[!] No response or invalid JSON received for circular introspection.", "yellow"))
+
+    if not isinstance(response_json, dict):
+        log(colored("[!] No response or invalid JSON for circular introspection.", "yellow"))
         return
-    if 'data' in response_json and '__type' in response_json['data']:
+
+    data = response_json.get("data")
+    if isinstance(data, dict) and '__type' in data:
         log(colored(f"[!] Circular introspection vulnerability found at {url}", "red"))
         log(colored("Typical severity: High", "red"))
         log("Evidence:\n" + json.dumps(response_json, indent=4))
@@ -124,8 +110,8 @@ def check_circular_introspection(url):
 def check_deeply_nested_query(url):
     query = {'query': '{ a1: __schema { queryType { name, fields { name, type { name, fields { name, type { name } } } } } } }'}
     response_json = send_query(url, query)
-    if not response_json:
-        log(colored("[!] No response or invalid JSON received for deeply nested query.", "yellow"))
+    if not isinstance(response_json, dict):
+        log(colored("[!] No response or invalid JSON for deeply nested query.", "yellow"))
         return
     if 'data' in response_json:
         log(colored(f"[!] Server responds to deeply nested queries at {url}. Possible DoS vulnerability.", "red"))
@@ -135,16 +121,16 @@ def check_deeply_nested_query(url):
 def check_batch_requests(url):
     batch_query = [{'query': '{ __schema { types { name } } }'}] * 10
     response_json = send_query(url, batch_query)
-    if not response_json:
-        log(colored("[!] No response or invalid JSON received for batch request.", "yellow"))
+    if not isinstance(response_json, list):
+        log(colored("[!] No response or invalid JSON for batch request.", "yellow"))
         return
     log(colored(f"[!] Server allows batch requests at {url}. May lead to DoS if abused.", "red"))
 
 def check_resource_request(url):
     query = {'query': '{ __type(name: "User") { name fields { name type { name kind ofType { name kind } } } } }'}
     response_json = send_query(url, query)
-    if not response_json:
-        log(colored("[!] No response or invalid JSON received for resource request.", "yellow"))
+    if not isinstance(response_json, dict):
+        log(colored("[!] No response or invalid JSON for resource request.", "yellow"))
         return
     if 'data' in response_json and '__type' in response_json['data']:
         log(colored(f"[!] Excessive resource request vulnerability found at {url}", "red"))
@@ -156,8 +142,8 @@ def check_resource_request(url):
 def check_directive_limit(url):
     query = {'query': '{ __type(name: "Directive") { name locations args { name type { name kind } } } }'}
     response_json = send_query(url, query)
-    if not response_json:
-        log(colored("[!] No response or invalid JSON received for directive check.", "yellow"))
+    if not isinstance(response_json, dict):
+        log(colored("[!] No response or invalid JSON for directive check.", "yellow"))
         return
     if 'data' in response_json and '__type' in response_json['data']:
         log(colored(f"[!] Unlimited number of directives vulnerability found at {url}", "red"))
@@ -169,43 +155,44 @@ def check_directive_limit(url):
 def check_error_based_enumeration(url):
     query = {'query': '{ thisDoesNotExist }'}
     response_json = send_query(url, query)
-    if not response_json:
-        log(colored("[!] No response or invalid JSON received for error enumeration.", "yellow"))
+    if not isinstance(response_json, dict):
+        log(colored("[!] No response or invalid JSON for error enumeration.", "yellow"))
         return
-    if 'errors' in response_json:
-        verbose_msgs = [e['message'] for e in response_json['errors'] if 'Did you mean' in e.get('message', '') or 'Cannot query field' in e.get('message', '')]
-        if verbose_msgs:
-            log(colored(f"[!] Verbose error messages detected at {url}", "red"))
-            log(colored("Typical severity: Medium", "blue"))
-            log("Evidence:\n" + json.dumps(response_json['errors'], indent=4))
-        else:
-            log(colored(f"[-] Error messages are not verbose at {url}", "green"))
+    errors = response_json.get("errors", [])
+    suggestions = [e['message'] for e in errors if 'Did you mean' in e.get('message', '') or 'Cannot query field' in e.get('message', '')]
+    if suggestions:
+        log(colored(f"[!] Verbose error messages detected at {url}", "red"))
+        log(colored("Typical severity: Medium", "blue"))
+        log("Evidence:\n" + json.dumps(errors, indent=4))
+    else:
+        log(colored(f"[-] Error messages are not verbose at {url}", "green"))
 
 def check_authorization_bypass(url):
-    for typename in ["User", "Admin", "Token", "Account"]:
+    types = ["User", "Admin", "Token", "Account"]
+    for typename in types:
         query = {'query': f'{{ __type(name: "{typename}") {{ name fields {{ name }} }} }}'}
         response_json = send_query(url, query)
-        if not response_json:
+        if not isinstance(response_json, dict):
             continue
         if response_json.get('data', {}).get('__type'):
-            log(colored(f"[!] Possible auth bypass – access to '{typename}' type without auth at {url}", "red"))
+            log(colored(f"[!] Possible auth bypass – access to '{typename}' without auth at {url}", "red"))
             log("Evidence:\n" + json.dumps(response_json, indent=4))
 
 def check_field_suggestion(url):
     query = {'query': '{ useer { id } }'}
     response_json = send_query(url, query)
-    if not response_json:
-        log(colored("[!] No response or invalid JSON received for field suggestion.", "yellow"))
+    if not isinstance(response_json, dict):
+        log(colored("[!] No response or invalid JSON for field suggestion check.", "yellow"))
         return
-    if 'errors' in response_json:
-        suggestions = [e['message'] for e in response_json['errors'] if 'Did you mean' in e.get('message', '')]
-        if suggestions:
-            log(colored(f"[!] Field suggestion leak detected at {url}", "red"))
-            log(colored("Typical severity: Medium", "blue"))
-            for s in suggestions:
-                log(s)
-        else:
-            log(colored(f"[-] No suggestion-based leakage at {url}", "green"))
+    errors = response_json.get("errors", [])
+    suggestions = [e['message'] for e in errors if 'Did you mean' in e.get('message', '')]
+    if suggestions:
+        log(colored(f"[!] Field suggestion leak detected at {url}", "red"))
+        log(colored("Typical severity: Medium", "blue"))
+        for s in suggestions:
+            log(s)
+    else:
+        log(colored(f"[-] No suggestion-based leakage at {url}", "green"))
 
 def check_rate_limiting(url):
     query = {'query': '{ __schema { types { name } } }'}
@@ -227,7 +214,7 @@ def check_fake_type_discovery(url):
     for typename in ["Token", "Session", "PrivateData", "SecretUser"]:
         query = {'query': f'{{ __type(name: "{typename}") {{ name }} }}'}
         response_json = send_query(url, query)
-        if not response_json:
+        if not isinstance(response_json, dict):
             continue
         if response_json.get('data', {}).get('__type'):
             log(colored(f"[!] Discovered undocumented type '{typename}' at {url}", "red"))
@@ -235,15 +222,17 @@ def check_fake_type_discovery(url):
 def check_token_field_leak(url):
     query = {'query': '{ __type(name: "User") { fields { name } } }'}
     response_json = send_query(url, query)
-    if not response_json:
-        log(colored("[!] No response or invalid JSON received for token leak check.", "yellow"))
+    if not isinstance(response_json, dict):
+        log(colored("[!] No response or invalid JSON for token leak check.", "yellow"))
         return
-    fields = [f['name'] for f in response_json['data']['__type'].get('fields', [])]
+    fields = [f['name'] for f in response_json.get('data', {}).get('__type', {}).get('fields', [])]
     leaks = [f for f in fields if any(k in f.lower() for k in ['token', 'password', 'secret', 'apikey', 'auth'])]
     if leaks:
         log(colored(f"[!] Sensitive fields found in 'User' type: {', '.join(leaks)}", "red"))
     else:
         log(colored("[-] No sensitive fields found in 'User' type", "green"))
+
+# === RUNNING CHECKS ===
 
 def run_all_checks(target, safe_mode):
     log(f"Scanning target: {target}")
@@ -266,13 +255,15 @@ def run_all_checks(target, safe_mode):
     check_fake_type_discovery(target)
     check_token_field_leak(target)
 
+# === MAIN ENTRY ===
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="GraphQL Security Scanner")
     parser.add_argument('-t', '--target', required=True, help="Target GraphQL endpoint.")
-    parser.add_argument('--safe-mode', action='store_true', help="Enable safe mode to avoid DoS risk.")
-    parser.add_argument('--throttle', type=float, default=0.5, help="Delay between requests in seconds.")
+    parser.add_argument('--safe-mode', action='store_true', help="Avoid DoS-prone checks.")
+    parser.add_argument('--throttle', type=float, default=0.5, help="Delay between requests.")
     parser.add_argument('--verbose', action='store_true', help="Enable debug output.")
-    parser.add_argument('--cookie', type=str, help="Cookie string (do not include 'Cookie:' prefix).")
+    parser.add_argument('--cookie', type=str, help="Cookie string (without 'Cookie:').")
     parser.add_argument('--bearer', type=str, help="Bearer token for Authorization header.")
 
     args = parser.parse_args()
