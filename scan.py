@@ -9,12 +9,21 @@
 # Usage:
 #   python3 scan.py -t https://target/graphql -H "Authorization: Bearer XXX"
 #   python3 scan.py -t https://target/graphql --json
+#
+# Version notes (all-tests, no extra flags):
+#   - Runs the complete suite with safe defaults (no “havoc”).
+#   - Curl-based verification + smart triage runs before reporting. If verification fails or looks mitigated, the item is
+#     treated as a NON-FINDING (not downgraded; nothing is recorded/persisted).
+#   - Added checks aligned with graphql-cop: alias overloading (>=100), array batching (>=10), directive overloading,
+#     field duplication (500x), POST url-encoded acceptance.
+#   - Batching FP fixed: explicit “not supported” or zero successful items -> non-finding.
 
 import argparse
 import json
 import time
 import re
 import os
+import subprocess
 import requests
 from urllib.parse import urlencode
 
@@ -28,6 +37,15 @@ DEFAULT_TIMEOUT = 12
 EVIDENCE_DIR = "evidence"
 VALID_SEVERITIES_FOR_FILES = {"LOW", "MEDIUM", "HIGH"}
 SEVERITY_ORDER_PREFIX = {"HIGH": "1-HIGH", "MEDIUM": "2-MEDIUM", "LOW": "3-LOW"}
+
+# Safe-but-demonstrative defaults (no CLI switches)
+SAFE_ALIAS_OVERLOAD_COUNT = 110          # >=100 to trigger alias overloading finding
+SAFE_FIELD_DUP_COUNT = 500               # exactly 500 repeats
+SAFE_DIRECTIVE_DUP_COUNT = 60            # lots, but single lightweight op
+SAFE_BATCH_SIZE = 12                     # >=10 simultaneous requests
+SAFE_ALIAS_PRESSURE = 50                 # lighter variant for latency signal
+SAFE_FRAGMENT_PRESSURE = 50              # lighter fragment explosion
+SAFE_DEPTH = 6                           # avoid deep recursion abuse
 
 # ---------------------------
 # Helpers: shell quoting, files & HTTP
@@ -54,10 +72,6 @@ def _basename_for(name, idx, severity):
 
 
 def write_evidence_json(name, idx, severity, payload):
-    """
-    Write one JSON evidence file with severity prefix so directory sort groups by severity.
-    Filename: "<rank-severity>-<slug>-<idx>.json"
-    """
     ensure_evidence_dir()
     base = _basename_for(name, idx, severity) + ".json"
     jpath = os.path.join(EVIDENCE_DIR, base)
@@ -67,7 +81,6 @@ def write_evidence_json(name, idx, severity, payload):
 
 
 def write_evidence_txt(name, idx, severity, payload):
-    """Create a human-readable .txt sibling with the same base name as the JSON."""
     ensure_evidence_dir()
     base = _basename_for(name, idx, severity) + ".txt"
     tpath = os.path.join(EVIDENCE_DIR, base)
@@ -104,7 +117,6 @@ def write_evidence_txt(name, idx, severity, payload):
     if raw:
         lines.append(_section("Raw"))
         try:
-            # Pretty if JSON-like
             raw_json = json.loads(raw)
             lines.append(json.dumps(raw_json, indent=2, ensure_ascii=False))
         except Exception:
@@ -131,7 +143,7 @@ def post_json(url, payload, headers, timeout, verify_tls):
     base = {
         "Content-Type": "application/json",
         "Accept": "application/graphql-response+json, application/json;q=0.9, */*+json;q=0.8",
-        "User-Agent": "gql-scanner/1.5 (+https://fortytwo.security)"
+        "User-Agent": "gql-scanner/1.7 (+https://fortytwo.security)"
     }
     hdrs = {**base, **(headers or {})}
     try:
@@ -150,10 +162,33 @@ def post_json(url, payload, headers, timeout, verify_tls):
         return None, {}, None, str(e), None
 
 
+def post_urlencoded(url, params_dict, headers, timeout, verify_tls):
+    base = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "application/graphql-response+json, application/json;q=0.9, */*+json;q=0.8",
+        "User-Agent": "gql-scanner/1.7 (+https://fortytwo.security)"
+    }
+    hdrs = {**base, **(headers or {})}
+    try:
+        t0 = time.time()
+        r = requests.post(url, data=urlencode(params_dict), headers=hdrs, timeout=timeout, verify=verify_tls)
+        elapsed = time.time() - t0
+        ct = r.headers.get("Content-Type", "")
+        data = None
+        if _is_json_ct(ct):
+            try:
+                data = r.json()
+            except ValueError:
+                data = None
+        return r.status_code, r.headers, data, r.text, elapsed
+    except requests.exceptions.RequestException as e:
+        return None, {}, None, str(e), None
+
+
 def get_json(url, params, headers, timeout, verify_tls):
     base = {
         "Accept": "application/graphql-response+json, application/json;q=0.9, */*+json;q=0.8",
-        "User-Agent": "gql-scanner/1.5 (+https://fortytwo.security)"
+        "User-Agent": "gql-scanner/1.7 (+https://fortytwo.security)"
     }
     hdrs = {**base, **(headers or {})}
     try:
@@ -172,15 +207,10 @@ def get_json(url, params, headers, timeout, verify_tls):
         return None, {}, None, str(e), None, None
 
 # ---------------------------
-# Curl builders (used in evidence files)
+# Curl builders
 # ---------------------------
 
 def build_curl_post(url, headers, payload, insecure=False):
-    """
-    Build a copy/paste-safe curl using a here-doc for the JSON body.
-    Works cleanly in bash/zsh and avoids quoting/escape pitfalls.
-    This returns a *clean* command (no JSON with \n escapes).
-    """
     lines = []
     lines.append(f"curl -sS -X POST {sh_quote(url)} \\")
     if insecure:
@@ -270,11 +300,9 @@ def looks_stacktrace(errors):
 # ---------------------------
 
 def extract_fragment_from_evidence(evidence):
-    """Short, decisive snippet for copy/paste into reports."""
     if not evidence:
         return ""
     if isinstance(evidence, dict):
-        # 1) GraphQL errors
         errors = evidence.get("errors") or evidence.get("data", {}).get("errors")
         if errors and isinstance(errors, list):
             msgs = []
@@ -284,7 +312,6 @@ def extract_fragment_from_evidence(evidence):
                     msgs.append(msg)
             if msgs:
                 return "\n".join(msgs)
-        # 2) Stack trace
         def find_stack(obj):
             if isinstance(obj, dict):
                 for _, v in obj.items():
@@ -302,7 +329,6 @@ def extract_fragment_from_evidence(evidence):
         st = find_stack(evidence)
         if st:
             return st[:4000] + ("\n...[truncated]" if len(st) > 4000 else "")
-        # 3) Schema sample
         data = evidence.get("data") if isinstance(evidence.get("data"), dict) else evidence.get("data")
         if data:
             schema = data.get("__schema") or data.get("__type")
@@ -312,7 +338,6 @@ def extract_fragment_from_evidence(evidence):
                     sample = [t.get("name") for t in types[:25] if isinstance(t, dict) and t.get("name")]
                     if sample:
                         return "Types (sample): " + ", ".join(sample)
-        # 4) Pretty JSON fallback
         try:
             s = json.dumps(evidence, indent=2, ensure_ascii=False)
             return s[:4000] + ("\n...[truncated]" if len(s) > 4000 else "")
@@ -321,40 +346,139 @@ def extract_fragment_from_evidence(evidence):
     s = str(evidence)
     return s[:4000] + ("\n...[truncated]" if len(s) > 4000 else "")
 
+# ---------------------------
+# Curl verify & smart FP triage (always ON)
+# ---------------------------
 
-def report_finding(findings, name, severity, *, evidence_obj=None, raw_text=None, fragment=None, meta=None, verify_curl=None):
+CURL_TIMEOUT = 20
+
+WAF_BLOCK_HINTS = [
+    "access denied", "forbidden", "not allowed", "blocked", "captcha",
+    "cloudflare", "akamai", "imperva", "web application firewall"
+]
+
+# Errors that indicate mitigation in place, not a vuln being exercised
+MITIGATION_HINTS = [
+    "maximum query", "complexity", "cost", "depth", "throttle",
+    "rate limit", "too many", "not supported"
+]
+
+def run_curl_verify(cmd, timeout=CURL_TIMEOUT):
+    try:
+        proc = subprocess.run(
+            cmd,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout
+        )
+        out = proc.stdout.decode("utf-8", errors="ignore")
+        err = proc.stderr.decode("utf-8", errors="ignore")
+        ok = (proc.returncode == 0)
+        return ok, out, err, proc.returncode
+    except subprocess.TimeoutExpired:
+        return False, "", f"timeout after {timeout}s", -1
+    except Exception as e:
+        return False, "", f"exec error: {e}", -1
+
+
+def looks_waf_block(s: str) -> bool:
+    s_low = (s or "").lower()
+    return any(h in s_low for h in WAF_BLOCK_HINTS)
+
+def looks_mitigated(s: str) -> bool:
+    s_low = (s or "").lower()
+    return any(h in s_low for h in MITIGATION_HINTS)
+
+def triage_verify_output(body: str, markers=None, min_len=2, negative_markers=None) -> bool:
     """
-    Append finding; create ONE evidence JSON file ONLY for real issues (LOW/MEDIUM/HIGH).
-    JSON contains: name, severity, timestamp, meta, fragment, evidence, raw, verify_curl (last key).
-    Additionally, create a .txt file with the same base name containing a clean, human-readable rendering,
-    including the *cleaned* verify_curl command (multi-line here-doc, not JSON-escaped).
+    True => acceptable reproduction signal.
+    Positive logic: body has any markers (if provided) or is non-empty.
+    Negative logic: reject if WAF/mitigation hints or any negative marker present.
     """
-    idx = len(findings) + 1
-    evidence = evidence_obj if evidence_obj is not None else {}
+    if not body:
+        return False
+    if looks_waf_block(body) or looks_mitigated(body):
+        return False
+    if negative_markers:
+        b = body.lower()
+        for m in negative_markers:
+            if m and m.lower() in b:
+                return False
+    if markers:
+        for m in markers:
+            if m and m in body:
+                return True
+        return False
+    return len(body) >= min_len
+
+
+def build_markers(fragment: str, default_markers=None):
+    if default_markers:
+        return default_markers
+    if not fragment:
+        return None
+    frag = fragment.strip()
+    if not frag:
+        return None
+    candidates = []
+    for token in ["__schema", "__type", "__typename", "Did you mean", "isDeprecated", "GraphiQL", "Playground", "Altair"]:
+        if token in frag:
+            candidates.append(token)
+    if candidates:
+        return list(set(candidates))
+    m = re.findall(r"[A-Za-z0-9_]{6,}", frag[:120])
+    return m[:3] if m else None
+
+# ---------------------------
+# Reporting with pre-verification (non-verified => NON-FINDING)
+# ---------------------------
+
+def report_finding(findings, name, severity, *, evidence_obj=None, raw_text=None, fragment=None, meta=None,
+                   verify_curl=None, verify_markers=None, negative_markers=None):
+    """
+    Append finding and persist evidence ONLY if:
+      - severity in LOW/MEDIUM/HIGH, AND
+      - verify_curl (when provided) reproduces successfully according to triage.
+    If verification fails: treat as NON-FINDING (return None, do not append).
+    INFO findings may be recorded (they don't use curl verification).
+    """
+    # For LOW/MEDIUM/HIGH: pre-verify if we have a curl
+    if severity in VALID_SEVERITIES_FOR_FILES and verify_curl:
+        markers = verify_markers or build_markers(fragment)
+        ok, out, err, rc = run_curl_verify(verify_curl)
+        negs = negative_markers or ["maximum query","complexity","cost","depth","too many","not supported","rate limit","throttle"]
+        if not ok or not triage_verify_output(out, markers=markers, negative_markers=negs):
+            print(colored(f"[~] Verification/triage rejected '{name}' (non-finding).", "yellow"))
+            return None
+
+    # Build record
     record = {
         "name": name,
         "severity": severity,
         "meta": meta or {},
-        "evidence": evidence,
+        "evidence": evidence_obj if evidence_obj is not None else {},
         "raw": raw_text
     }
+
     findings.append(record)
 
+    # Persist only LOW/MEDIUM/HIGH
     if severity not in VALID_SEVERITIES_FOR_FILES:
-        return record  # no files for INFO
+        return record
 
-    # Payload to persist
     payload = {
         "name": name,
         "severity": severity,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "meta": meta or {},
-        "fragment": (fragment or extract_fragment_from_evidence(evidence) or (raw_text or ""))[:4000],
-        "evidence": evidence,
+        "fragment": (fragment or extract_fragment_from_evidence(evidence_obj) or (raw_text or ""))[:4000],
+        "evidence": evidence_obj if evidence_obj is not None else {},
         "raw": raw_text,
         "verify_curl": verify_curl or ""
     }
 
+    idx = len(findings)
     jpath = write_evidence_json(name, idx, severity, payload)
     tpath = write_evidence_txt(name, idx, severity, payload)
     print(colored(f"Evidence JSON: {jpath}", "cyan"))
@@ -362,7 +486,7 @@ def report_finding(findings, name, severity, *, evidence_obj=None, raw_text=None
     return record
 
 # ---------------------------
-# Checks (each passes verify_curl)
+# Checks
 # ---------------------------
 
 def check_introspection(url, headers, timeout, verify_tls, findings):
@@ -372,11 +496,11 @@ def check_introspection(url, headers, timeout, verify_tls, findings):
     meta = {"http_status": code, "latency_s": tt, "content_type": hdrs.get("Content-Type") if hdrs else None}
     if code in (401, 403) and not data:
         print(colored("[!] Introspection request blocked by edge/auth (HTTP %s)" % code, "yellow"))
+        # Keep breadcrumb as INFO (useful context)
         report_finding(findings, name, "INFO", evidence_obj={"blocked": True}, raw_text=raw, meta=meta)
         return False
     if data and isinstance(data, dict) and data.get("data", {}).get("__schema"):
         print_result(False, f"{name} at {url}")
-        print(sev("LOW")("Typical severity: Low"))
         types = data.get("data", {}).get("__schema", {}).get("types")
         frag = None
         if types and isinstance(types, list):
@@ -387,7 +511,7 @@ def check_introspection(url, headers, timeout, verify_tls, findings):
             findings, name, "LOW",
             evidence_obj={"schema_sample": types[:50] if types else None},
             raw_text=json.dumps(data, indent=2, ensure_ascii=False),
-            fragment=frag, meta=meta, verify_curl=verify
+            fragment=frag, meta=meta, verify_curl=verify, verify_markers=["__schema"]
         )
         return True
     else:
@@ -426,17 +550,16 @@ def check_circular_introspection(url, headers, timeout, verify_tls, findings):
     meta = {"http_status": code, "latency_s": tt}
     if data and data.get("data", {}).get("__type"):
         print(colored(f"[!] {name} vulnerability found at {url}", "red"))
-        print(sev("HIGH")("Typical severity: High"))
         frag = json.dumps(data.get("data", {}).get("__type"), indent=2, ensure_ascii=False)
         verify = build_curl_post(url, headers, payload, insecure=not verify_tls)
         report_finding(
             findings, name, "HIGH",
             evidence_obj={"data": data.get("data", {})},
-            raw_text=frag, fragment=frag[:4000], meta=meta, verify_curl=verify
+            raw_text=frag, fragment=frag[:4000], meta=meta, verify_curl=verify, verify_markers=["__type"]
         )
     else:
         print(colored(f"[+] No {name} vulnerability found", "green"))
-        report_finding(findings, name, "INFO", evidence_obj={"raw": raw}, raw_text=raw, meta=meta)
+        # no finding
 
 
 def check_introspection_bypass(url, headers, timeout, verify_tls, findings):
@@ -461,12 +584,10 @@ def check_introspection_bypass(url, headers, timeout, verify_tls, findings):
                        evidence_obj={"results": combined},
                        raw_text=json.dumps(combined, indent=2, ensure_ascii=False),
                        fragment="Bypass worked with one of the probes.", meta={"hit": True},
-                       verify_curl=verify)
+                       verify_curl=verify, verify_markers=["__schema"])
     else:
         print_result(True, f"{name}: not effective")
-        report_finding(findings, name, "INFO",
-                       evidence_obj={"results": combined},
-                       raw_text=json.dumps(combined, indent=2, ensure_ascii=False))
+        # no finding
 
 
 def check_suggestive_errors(url, headers, timeout, verify_tls, findings):
@@ -489,12 +610,10 @@ def check_suggestive_errors(url, headers, timeout, verify_tls, findings):
                        raw_text=json.dumps(data.get("errors"), indent=2, ensure_ascii=False),
                        fragment="\n".join(suggestions[:10]),
                        meta={"rand_field": rand_field},
-                       verify_curl=verify)
+                       verify_curl=verify, verify_markers=["Did you mean"])
     else:
         print_result(True, f"{name}: no suggestive hints")
-        report_finding(findings, name, "INFO",
-                       evidence_obj={"errors": data.get("errors") if isinstance(data, dict) else data},
-                       raw_text=raw)
+        # no finding
 
 
 def check_deprecated_fields(url, headers, timeout, verify_tls, findings):
@@ -511,27 +630,55 @@ def check_deprecated_fields(url, headers, timeout, verify_tls, findings):
                        evidence_obj={"fields": deprecated},
                        raw_text=json.dumps(deprecated, indent=2, ensure_ascii=False),
                        fragment=frag,
-                       verify_curl=verify)
+                       verify_curl=verify, verify_markers=["isDeprecated"])
     else:
         print_result(True, f"{name}: none visible (or introspection blocked)")
-        report_finding(findings, name, "INFO", evidence_obj={"fields": fields}, raw_text=raw)
+        # no finding
 
 
 def check_get_support(url, headers, timeout, verify_tls, findings):
     params = {'query': '{ __typename }'}
     code, hdrs, data, raw, tt, final_url = get_json(url, params, headers, timeout, verify_tls)
     name = "GET method enabled for GraphQL"
-    if code and code < 500 and (data or (raw and "data" in raw)):
+    if code and 200 <= code < 300 and (data or (raw and "data" in raw)):
         print_result(False, f"{name}: {final_url}")
         verify = build_curl_get(url, headers, params, insecure=not verify_tls)
-        report_finding(findings, name, "LOW",
+        report_finding(findings, name, "MEDIUM",
                        evidence_obj={"url": final_url, "status": code, "body": data or raw},
                        raw_text=json.dumps(data if data else {"raw": raw}, indent=2, ensure_ascii=False),
                        fragment=str(data)[:2000] if data else raw[:2000],
-                       verify_curl=verify)
+                       verify_curl=verify, verify_markers=["__typename"])
     else:
         print_result(True, f"{name}: not supported")
-        report_finding(findings, name, "INFO", evidence_obj={"status": code, "body": raw}, raw_text=raw)
+        # no finding
+
+
+def check_post_urlencoded(url, headers, timeout, verify_tls, findings):
+    """POST with application/x-www-form-urlencoded (possible CSRF)."""
+    q = '{ __typename }'
+    params = {"query": q}
+    code, hdrs, data, raw, tt = post_urlencoded(url, params, headers, timeout, verify_tls)
+    name = "POST url-encoded query acceptance (possible CSRF)"
+    if code and 200 <= code < 300 and (data or (raw and "data" in raw)):
+        print_result(False, f"{name}: accepted with HTTP {code}")
+        # Build curl for urlencoded
+        header_flags = " ".join(["-H " + sh_quote(f"{k}: {v}") for k, v in (headers or {}).items()])
+        verify = (
+            f"curl -sS -X POST {sh_quote(url)} "
+            f"{'-k ' if not verify_tls else ''}"
+            f"-H 'Content-Type: application/x-www-form-urlencoded' "
+            f"-H 'Accept: application/graphql-response+json, application/json' "
+            f"{header_flags} "
+            f"--data {sh_quote(urlencode(params))}"
+        )
+        report_finding(findings, name, "MEDIUM",
+                       evidence_obj={"status": code, "body": data or raw},
+                       raw_text=json.dumps(data if data else {"raw": raw}, indent=2, ensure_ascii=False),
+                       fragment=str(data)[:2000] if data else raw[:2000],
+                       verify_curl=verify, verify_markers=['"data":', '"errors":', '__typename'])
+    else:
+        print_result(True, f"{name}: not accepted")
+        # non-finding
 
 
 def check_cors(url, headers, timeout, verify_tls, findings):
@@ -551,11 +698,10 @@ def check_cors(url, headers, timeout, verify_tls, findings):
                            verify_curl=verify)
         else:
             print_result(True, f"{name}: No obvious risks ({acao}, credentials={acac})")
-            report_finding(findings, name, "INFO", evidence_obj=ev,
-                           raw_text=json.dumps(dict(r.headers), indent=2, ensure_ascii=False))
+            # no finding
     except requests.exceptions.RequestException as e:
         print(colored(f"[!] CORS probe failed: {e}", "yellow"))
-        report_finding(findings, "CORS probe failed", "INFO", evidence_obj={"error": str(e)})
+        # no finding
 
 
 def check_stacktrace_leak(url, headers, timeout, verify_tls, findings):
@@ -571,12 +717,10 @@ def check_stacktrace_leak(url, headers, timeout, verify_tls, findings):
                        evidence_obj={"errors": data.get("errors")},
                        raw_text=json.dumps(data, indent=2, ensure_ascii=False),
                        fragment=frag[:4000],
-                       verify_curl=verify)
+                       verify_curl=verify, verify_markers=["Traceback","Exception","Error"])
     else:
         print_result(True, f"{name}: no stack traces visible")
-        report_finding(findings, name, "INFO",
-                       evidence_obj={"errors": data.get("errors") if isinstance(data, dict) else data},
-                       raw_text=raw)
+        # no finding
 
 
 def check_alias_pressure(url, headers, timeout, verify_tls, alias_count, findings):
@@ -588,15 +732,17 @@ def check_alias_pressure(url, headers, timeout, verify_tls, alias_count, finding
     if code and code < 500 and tt and tt > 2.0:
         print_result(False, f"{name}: slow response ({tt:.2f}s) with {alias_count} aliases")
         verify = build_curl_post(url, headers, payload, insecure=not verify_tls)
-        report_finding(findings, name, "LOW",
+        sev_level = "LOW"
+        if alias_count >= 100 and tt >= 3.5:
+            sev_level = "HIGH"
+        report_finding(findings, name, sev_level,
                        evidence_obj=evidence,
                        raw_text=json.dumps(data if data else {"raw": raw}, indent=2, ensure_ascii=False),
                        fragment=f"Latency: {tt:.2f}s with {alias_count} aliases",
-                       verify_curl=verify)
+                       verify_curl=verify, verify_markers=['"data":', '"errors":', '__typename'])
     else:
         print_result(True, f"{name}: handled {alias_count} aliases in {0.0 if not tt else tt:.2f}s")
-        report_finding(findings, name, "INFO", evidence_obj=evidence,
-                       raw_text=json.dumps(data if data else {"raw": raw}, indent=2, ensure_ascii=False))
+        # no finding
 
 
 def check_fragment_explosion(url, headers, timeout, verify_tls, frag_count, findings):
@@ -613,11 +759,10 @@ def check_fragment_explosion(url, headers, timeout, verify_tls, frag_count, find
                        evidence_obj=evidence,
                        raw_text=json.dumps(data if data else {"raw": raw}, indent=2, ensure_ascii=False),
                        fragment=f"Latency: {tt:.2f}s with {frag_count} fragments",
-                       verify_curl=verify)
+                       verify_curl=verify, verify_markers=['"data":', '"errors":', '__typename'])
     else:
         print_result(True, f"{name}: handled {frag_count} fragments in {0.0 if not tt else tt:.2f}s")
-        report_finding(findings, name, "INFO", evidence_obj=evidence,
-                       raw_text=json.dumps(data if data else {"raw": raw}, indent=2, ensure_ascii=False))
+        # no finding
 
 
 def check_defer_stream(url, headers, timeout, verify_tls, findings):
@@ -633,12 +778,10 @@ def check_defer_stream(url, headers, timeout, verify_tls, findings):
         report_finding(findings, name, "LOW",
                        evidence_obj={"defer": data_d, "stream": data_s},
                        raw_text=json.dumps({"defer": data_d, "stream": data_s}, indent=2, ensure_ascii=False),
-                       verify_curl=verify)
+                       verify_curl=verify, verify_markers=['"data":', '"errors":', '__typename'])
     else:
         print_result(True, f"{name}: not supported or blocked")
-        report_finding(findings, name, "INFO",
-                       evidence_obj={"defer": data_d, "stream": data_s},
-                       raw_text=json.dumps({"defer": data_d, "stream": data_s}, indent=2, ensure_ascii=False))
+        # no finding
 
 
 def check_deeply_nested(url, headers, timeout, verify_tls, depth, findings):
@@ -654,13 +797,30 @@ def check_deeply_nested(url, headers, timeout, verify_tls, depth, findings):
                        evidence_obj=evidence,
                        raw_text=json.dumps(data if data else {"raw": raw}, indent=2, ensure_ascii=False),
                        fragment=f"Latency: {tt:.2f}s at depth {depth}",
-                       verify_curl=verify)
+                       verify_curl=verify, verify_markers=['"data":', '"errors":', '__typename'])
     else:
         print_result(True, f"{name}: depth {depth} OK ({0.0 if not tt else tt:.2f}s)")
-        report_finding(findings, name, "INFO",
-                       evidence_obj=evidence,
-                       raw_text=json.dumps(data if data else {"raw": raw}, indent=2, ensure_ascii=False))
+        # no finding
 
+# ---- Batching FP-safe helpers ----
+
+def _batch_not_supported(resp):
+    """
+    Returns True if the response clearly says batching is not supported.
+    Handles both a single dict and a list of dicts.
+    """
+    def has_not_supported(errs):
+        for e in errs or []:
+            msg = (e.get("message") or "").lower()
+            if "batch" in msg and "not supported" in msg:
+                return True
+        return False
+
+    if isinstance(resp, dict):
+        return has_not_supported(resp.get("errors"))
+    if isinstance(resp, list) and resp:
+        return all(isinstance(it, dict) and has_not_supported(it.get("errors")) for it in resp)
+    return False
 
 def check_batching_isolation(url, headers, timeout, verify_tls, batch_size, findings):
     batch = []
@@ -672,21 +832,32 @@ def check_batching_isolation(url, headers, timeout, verify_tls, batch_size, find
     payload = batch
     code, hdrs, data, raw, tt = post_json(url, payload, headers, timeout, verify_tls)
     name = "Batching behavior & isolation"
+
+    # If the server explicitly declines batching -> NON-FINDING
+    if _batch_not_supported(data):
+        print_result(True, f"{name}: server explicitly does NOT support batching")
+        return
+
+    # Must be a list equal to request size
     if isinstance(data, list) and len(data) == batch_size:
         errs = sum(1 for d in data if isinstance(d, dict) and d.get("errors"))
         ok = sum(1 for d in data if isinstance(d, dict) and d.get("data"))
+
+        # Require at least one success to confirm execution
+        if ok == 0:
+            print_result(True, f"{name}: array shape but no successful items (likely filtered)")
+            return
+
         print_result(False, f"{name}: batch accepted (OK={ok}, ERR={errs})")
         verify = build_curl_post(url, headers, payload, insecure=not verify_tls)
-        report_finding(findings, name, "LOW",
-                       evidence_obj={"ok": ok, "errors": errs, "responses": data},
+        sev_level = "HIGH" if batch_size >= 10 else "LOW"
+        report_finding(findings, name, sev_level,
+                       evidence_obj={"ok": ok, "errors": errs, "responses": data, "batch_size": batch_size},
                        raw_text=json.dumps(data, indent=2, ensure_ascii=False),
-                       verify_curl=verify)
+                       verify_curl=verify, verify_markers=['"data":', '"errors":', '__typename'])
     else:
         print_result(True, f"{name}: batch not accepted or filtered")
-        report_finding(findings, name, "INFO",
-                       evidence_obj={"status": code, "raw": raw},
-                       raw_text=raw)
-
+        # non-finding
 
 def check_dev_ui_exposure(base_url, headers, timeout, verify_tls, findings):
     candidates = [
@@ -712,14 +883,13 @@ def check_dev_ui_exposure(base_url, headers, timeout, verify_tls, findings):
                        evidence_obj={"hits": hits},
                        raw_text=json.dumps(hits, indent=2, ensure_ascii=False),
                        fragment="\n".join([h.get("snippet","") for h in hits])[:4000],
-                       verify_curl=verify)
+                       verify_curl=verify, verify_markers=["GraphiQL","Playground","Altair"])
     else:
         print_result(True, f"{name}: not obviously exposed")
-        report_finding(findings, name, "INFO", evidence_obj={"hits": hits})
+        # non-finding
 
 
 def check_directive_limit(url, headers, timeout, verify_tls, findings):
-    # UPDATED: enumerate directives via __schema { directives { ... } }
     payload = {'query': '''
     {
       __schema {
@@ -741,13 +911,10 @@ def check_directive_limit(url, headers, timeout, verify_tls, findings):
         report_finding(findings, name, "LOW",
                        evidence_obj={"directives": data.get("data", {}).get("__schema", {}).get("directives")},
                        raw_text=json.dumps(data, indent=2, ensure_ascii=False),
-                       verify_curl=verify)
+                       verify_curl=verify, verify_markers=["directives"])
     else:
         print_result(True, f"{name}: directives not visible (blocked)")
-        report_finding(findings, name, "INFO",
-                       evidence_obj={"status": code, "raw": raw},
-                       raw_text=raw)
-
+        # non-finding
 
 def check_resource_request(url, headers, timeout, verify_tls, type_name, findings):
     payload = {'query': f'{{ __type(name:"{type_name}"){{ name fields {{ name type {{ name kind ofType {{ name kind }} }} }} }} }}'}
@@ -759,28 +926,99 @@ def check_resource_request(url, headers, timeout, verify_tls, type_name, finding
         report_finding(findings, name, "HIGH",
                        evidence_obj={"type": data.get("data", {})},
                        raw_text=json.dumps(data, indent=2, ensure_ascii=False),
-                       verify_curl=verify)
+                       verify_curl=verify, verify_markers=[type_name, "__type"])
     else:
         print_result(True, f"{name}: type not disclosed (or blocked)")
-        report_finding(findings, name, "INFO",
-                       evidence_obj={"status": code, "raw": raw},
-                       raw_text=raw)
+        # non-finding
+
+# ---------------------------
+# Additional overload checks (safe defaults)
+# ---------------------------
+
+def check_alias_overloading_high(url, headers, timeout, verify_tls, alias_count, findings):
+    """100+ aliases to simulate DoS-style overloading."""
+    fields = " ".join([f'a{i}: __typename' for i in range(alias_count)])
+    payload = {'query': f'{{ {fields} }}'}
+    code, hdrs, data, raw, tt = post_json(url, payload, headers, timeout, verify_tls)
+    name = f"Alias Overloading ({alias_count}+ aliases)"
+    evidence = {"aliases": alias_count, "latency_s": tt, "status": code}
+
+    # Any GraphQL-shaped response (<500) => processed; mitigation gets filtered in verification
+    if code and code < 500:
+        slow = tt and tt >= 3.5
+        print_result(False, f"{name}: status={code}, latency={tt:.2f}s")
+        verify = build_curl_post(url, headers, payload, insecure=not verify_tls)
+        severity = "HIGH" if slow else "MEDIUM"
+        # Positive markers: GraphQL envelope or __typename
+        pos_markers = ['"data":', '"errors":', '__typename']
+        report_finding(
+            findings, name, severity,
+            evidence_obj=evidence,
+            raw_text=json.dumps(data if data else {"raw": raw}, indent=2, ensure_ascii=False),
+            fragment=f"Latency: {tt:.2f}s with {alias_count} aliases",
+            verify_curl=verify,
+            verify_markers=pos_markers
+        )
+    else:
+        print_result(True, f"{name}: resisted or blocked")
+        # non-finding
+
+
+def check_field_duplication(url, headers, timeout, verify_tls, repeat_count, findings):
+    """Repeat the exact same field many times."""
+    same_fields = " ".join(["__typename" for _ in range(repeat_count)])
+    payload = {'query': f'{{ {same_fields} }}'}
+    code, hdrs, data, raw, tt = post_json(url, payload, headers, timeout, verify_tls)
+    name = f"Field Duplication ({repeat_count}x same field)"
+    evidence = {"repeated": repeat_count, "latency_s": tt, "status": code}
+    if code and code < 500:
+        slow = tt and tt >= 3.0
+        print_result(False, f"{name}: status={code}, latency={tt:.2f}s")
+        verify = build_curl_post(url, headers, payload, insecure=not verify_tls)
+        severity = "HIGH" if slow or repeat_count >= 500 else "MEDIUM"
+        report_finding(findings, name, severity,
+                       evidence_obj=evidence,
+                       raw_text=json.dumps(data if data else {"raw": raw}, indent=2, ensure_ascii=False),
+                       fragment=f"Latency: {tt:.2f}s with {repeat_count} repeated fields",
+                       verify_curl=verify, verify_markers=['"data":', '"errors":', '__typename'])
+    else:
+        print_result(True, f"{name}: duplication blocked or limited")
+        # non-finding
+
+
+def check_directive_overloading(url, headers, timeout, verify_tls, dup_count, findings):
+    """
+    Duplicate a directive many times, e.g. @include(if:true) applied repeatedly.
+    """
+    many_dirs = " ".join([f'__typename @include(if:true)' for _ in range(dup_count)])
+    payload = {'query': f'query {{ {many_dirs} }}'}
+    code, hdrs, data, raw, tt = post_json(url, payload, headers, timeout, verify_tls)
+    name = f"Directive Overloading (duplicate directives x{dup_count})"
+    evidence = {"duplicates": dup_count, "latency_s": tt, "status": code}
+    if code and code < 500:
+        slow = tt and tt >= 3.0
+        print_result(False, f"{name}: status={code}, latency={tt:.2f}s")
+        verify = build_curl_post(url, headers, payload, insecure=not verify_tls)
+        severity = "HIGH" if slow or dup_count >= 50 else "MEDIUM"
+        report_finding(findings, name, severity,
+                       evidence_obj=evidence,
+                       raw_text=json.dumps(data if data else {"raw": raw}, indent=2, ensure_ascii=False),
+                       fragment=f"Latency: {tt:.2f}s with {dup_count} duplicate directives",
+                       verify_curl=verify, verify_markers=['"data":', '"errors":', '__typename'])
+    else:
+        print_result(True, f"{name}: directive duplication blocked or limited")
+        # non-finding
 
 # ---------------------------
 # Main
 # ---------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="GraphQL endpoint vulnerability checks (extended).")
+    parser = argparse.ArgumentParser(description="GraphQL endpoint vulnerability checks (full suite, safe defaults).")
     parser.add_argument('-t', '--target', required=True, help="Target GraphQL endpoint URL (POST endpoint).")
     parser.add_argument('-H', '--header', action='append', help='Extra header "Name: Value" (repeatable).')
     parser.add_argument('--insecure', action='store_true', help='Allow insecure TLS (verify=False).')
     parser.add_argument('--timeout', type=int, default=DEFAULT_TIMEOUT, help='Per-request timeout seconds.')
-    parser.add_argument('--aliases', type=int, default=50, help='Alias count for alias pressure test.')
-    parser.add_argument('--fragments', type=int, default=50, help='Fragment count for explosion test.')
-    parser.add_argument('--depth', type=int, default=6, help='Requested depth for deep queries (2..8).')
-    parser.add_argument('--batch', type=int, default=8, help='Batch size for batching test.')
-    parser.add_argument('--type', default='User', help='Type name to probe in resource request test.')
     parser.add_argument('--json', action='store_true', help='Output JSON findings to stdout at the end.')
     args = parser.parse_args()
 
@@ -790,6 +1028,7 @@ def main():
     findings = []
 
     print(colored(f"Starting GraphQL checks against: {target}", "cyan"))
+    print(colored("Full test suite (safe defaults) + curl verification & FP triage: ENABLED (non-verified => non-finding)", "cyan"))
 
     # Core visibility / controls
     introspection = check_introspection(target, headers, args.timeout, verify_tls, findings)
@@ -801,22 +1040,28 @@ def main():
 
     # Transport & perimeter controls
     check_get_support(target, headers, args.timeout, verify_tls, findings)
+    check_post_urlencoded(target, headers, args.timeout, verify_tls, findings)
     check_cors(target, headers, args.timeout, verify_tls, findings)
     check_stacktrace_leak(target, headers, args.timeout, verify_tls, findings)
 
     # Resource pressure (safe defaults)
-    check_alias_pressure(target, headers, args.timeout, verify_tls, args.aliases, findings)
-    check_fragment_explosion(target, headers, args.timeout, verify_tls, args.fragments, findings)
-    check_deeply_nested(target, headers, args.timeout, verify_tls, args.depth, findings)
-    check_batching_isolation(target, headers, args.timeout, verify_tls, args.batch, findings)
+    check_alias_pressure(target, headers, args.timeout, verify_tls, SAFE_ALIAS_PRESSURE, findings)
+    check_fragment_explosion(target, headers, args.timeout, verify_tls, SAFE_FRAGMENT_PRESSURE, findings)
+    check_deeply_nested(target, headers, args.timeout, verify_tls, SAFE_DEPTH, findings)
+    check_batching_isolation(target, headers, args.timeout, verify_tls, SAFE_BATCH_SIZE, findings)
 
     # Feature flags / dev surfaces
     check_defer_stream(target, headers, args.timeout, verify_tls, findings)
     check_dev_ui_exposure(target, headers, args.timeout, verify_tls, findings)
 
     # Schema/data breadth probes
-    check_resource_request(target, headers, args.timeout, verify_tls, args.type, findings)
+    check_resource_request(target, headers, args.timeout, verify_tls, "User", findings)
     check_directive_limit(target, headers, args.timeout, verify_tls, findings)
+
+    # Additional overload checks (aligned with graphql-cop items)
+    check_alias_overloading_high(target, headers, args.timeout, verify_tls, SAFE_ALIAS_OVERLOAD_COUNT, findings)
+    check_field_duplication(target, headers, args.timeout, verify_tls, SAFE_FIELD_DUP_COUNT, findings)
+    check_directive_overloading(target, headers, args.timeout, verify_tls, SAFE_DIRECTIVE_DUP_COUNT, findings)
 
     # Final summary
     high = [f for f in findings if f.get("severity") == "HIGH"]
@@ -825,7 +1070,7 @@ def main():
     info = [f for f in findings if f.get("severity") == "INFO"]
     print("\n" + colored("=== Summary ===", "magenta"))
     print(colored(f"HIGH: {len(high)}  MEDIUM: {len(med)}  LOW: {len(low)}  INFO: {len(info)}", "magenta"))
-    print(colored("Evidence JSON/TXT files are written only for LOW/MEDIUM/HIGH findings, with severity-prefixed basenames and a clean verify_curl.", "cyan"))
+    print(colored("Only verified LOW/MEDIUM/HIGH are written to evidence. Items failing verification/mitigation triage are not recorded.", "cyan"))
     if args.json:
         print(json.dumps({"target": target, "findings": findings}, indent=2, default=str))
 
