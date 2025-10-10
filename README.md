@@ -2,116 +2,152 @@
 
 ## Description
 
-`scan.py` is a Python script that checks a GraphQL endpoint for common vulnerabilities, including introspection, schema misconfigurations, and denial-of-service (DoS)-related issues. It is designed for **educational and authorized security testing only**.
+**GraphQL-scanner** checks a GraphQL endpoint for common weaknesses, including introspection exposure, schema misconfigurations, transport/perimeter issues, and safe resource-pressure signals. It uses safe defaults (no havoc), verifies findings with a reproducible `curl` command, and persists evidence only for verified findings.
 
-This scanner supports:
-
-    - ✅ **Safe mode** to avoid DoS risks
-    - 💤 **Request throttling**
-    - 🗂️ **Automatic report generation** (timestamped `.txt` file)
-    - 🔐 **Support for session cookies and Bearer tokens**
-    - 🧠 **Schema analysis with field classification and depth estimation**
-    - 🚨 **Sensitive field detection and live data resolution**
-    - 📊 **Schema coverage report with field/complexity metrics**
-    - 💬 **Verbose mode for debugging responses and headers**
-
-> **⚠️ Disclaimer**: This tool must only be used against systems for which you have **explicit permission**. Unauthorized use is strictly prohibited and may be illegal. Always respect target system policies, and follow responsible disclosure guidelines.
+> **⚠️ Authorized testing only.** Use this tool only against systems where you have explicit permission.
 
 ---
 
-## Current Checks
+## Key Features
 
-- ✅ **Introspection Exposure** (`__schema`)
-- ✅ **Circular Introspection Abuse** (`__type(name: "Query")`)
-- ✅ **Deeply Nested Query Handling** *(optional, skipped in `--safe-mode`)*
-- ✅ **Batch Query Processing** *(optional, skipped in `--safe-mode`)*
-- ✅ **Excessive Resource Exposure** (`__type(name: "User")`) with:
-  - Field type classification (SCALAR, LIST, OBJECT, etc.)
-  - Sensitive field heuristics (`token`, `password`, etc.)
-  - Depth estimation
-- ✅ **Unlimited Directives Enumeration**
-- ✅ **Error-Based Enumeration** (e.g., "Did you mean")
-- ✅ **Authorization Bypass Detection** (with auth context awareness)
-- ✅ **Field Suggestion Leakage**
-- ✅ **Rate Limiting Behavior Test** *(optional, skipped in `--safe-mode`)*
-- ✅ **Fake/Hidden Type Discovery** (e.g., `Token`, `Session`, `SecretUser`)
-- ✅ **Sensitive Field Resolver** — tests if sensitive fields return real data
-- ✅ **Schema Coverage Summary** — field count, depth, exposure
+- ✅ **Safe defaults**: full suite designed to avoid DoS (moderate sizes, single requests for verification).  
+- ✅ **Verification-first reporting**: each finding includes a reproducible `curl` (`verify_curl`) and is only recorded if verification passes smart triage.  
+- ✅ **Evidence artifacts**: JSON and TXT per finding in `./evidence/`, severity-prefixed file names.  
+- ✅ **Robust HTTP helpers**: JSON, `application/x-www-form-urlencoded` POSTs, and GET probing.  
+- ✅ **Content-type aware parsing** and latency capture.  
+- ✅ **Colorized terminal output** + optional JSON summary to stdout.
 
 ---
 
+## Checks Performed
 
-# Installation 
+### Schema / Introspection
+- Introspection enabled (`__schema`)  
+- Circular introspection (`__type(name:"Query")` with nested `ofType`)  
+- Introspection blocklist bypass probes (aliases / fragments / variables)  
+- Deprecated field enumeration (`includeDeprecated: true`)  
+- Suggestive error leakage (“Did you mean …”)
 
-Clone repository with:
+### Transport / Perimeter Controls
+- GET method enabled for GraphQL  
+- POST `application/x-www-form-urlencoded` acceptance (potential CSRF surface)  
+- CORS configuration (e.g., `*` with credentials)  
+- Stack trace / exception leakage (error detail exposure)
 
-    git clone https://github.com/davidfortytwo/graphql-scanner
+### Resource-Pressure (safe signals, not DoS)
+- Alias pressure (shallow complexity) (~50 aliases)  
+- Fragment explosion (light) (~50 fragments)  
+- Deep query handling (depth limit) (depth ~6)  
+- Batching behavior & isolation (JSON array payload, ~12 ops)  
+- Alias overloading (≥110) — safe single request, latency observed  
+- Field duplication (same field ×500) — safe single request  
+- Directive overloading (duplicate `@include` ×60) — safe single request
 
-Install dependencies with:
+### Feature Surfaces / Dev UI
+- Support for `@defer` / `@stream`  
+- Developer UI exposure (GraphiQL / Playground / Altair)
 
-    pip3 install -r requirements
+### Resource Enumeration
+- Excessive resource request for a target type (default: `User`)  
+- Directive enumeration (names, locations, args)
 
-# Usage
+> **Note:** Findings the server clearly mitigates (e.g., explicit complexity/depth limits, batch “not supported”, WAF blocks) are treated as **non-findings** and are not persisted.
 
-Basic scan:
+---
 
-    python scan.py -t http://example.com/graphql
+## Installation
 
-This will run the scanner against the specified endpoint and print out any vulnerabilities that it finds.
+```bash
+git clone https://github.com/davidfortytwo/graphql-scanner
+cd graphql-scanner
+pip3 install -r requirements
+```
 
-Optional Flags:
+---
 
-    Option	Description
-    --safe-mode	Avoids checks that could cause server stress (deep nesting, batch, rate limit tests).
-    --throttle <sec>	Set delay (in seconds) between each request. Default is 0.5.
-    --verbose	Enables debug output, useful for troubleshooting.
-    --cookie "<val>"	Include a session cookie (e.g., 'sessionid=abc123; other=value')
-    --bearer <token>	Set a Bearer token for Authorization header
+## Usage
 
-Example:
+### Basic scan
 
-Run a safe-mode scan with a throttle and debug output:
+```bash
+python3 scan.py -t https://example.com/graphql
+```
 
-    python3 scan.py -t http://example.com/graphql --safe-mode --throttle 1.0 --verbose
+### With headers (Bearer token or cookie)
 
-Run authenticated with a session cookie:
+```bash
+python3 scan.py -t https://example.com/graphql \
+  -H "Authorization: Bearer <token>" \
+  -H "Cookie: sessionid=abc123"
+```
 
-    python scan.py -t https://example.com/graphql --cookie "sessionid=abc123"
+### Insecure TLS (staging / self-signed)
 
-Run with a Bearer token:
+```bash
+python3 scan.py -t https://staging.local/graphql --insecure
+```
 
-    python scan.py -t https://example.com/graphql --bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+### Custom timeout + JSON summary
 
+```bash
+python3 scan.py -t https://example.com/graphql --timeout 20 --json
+```
 
+---
 
-# Output
+## Command-Line Options
 
-All output is shown in the terminal with color coding.
-A full report is saved to a file: graphql_scan_report_<timestamp>.txt.
+| Option | Description |
+|---|---|
+| `-t, --target <url>` | **Required.** Target GraphQL POST endpoint. |
+| `-H, --header "Name: Value"` | Extra header (repeatable). Useful for `Authorization`, `Cookie`, etc. |
+| `--insecure` | Disable TLS verification (testing only). |
+| `--timeout <sec>` | Per-request timeout (default: 12). |
+| `--json` | Print final findings as JSON to stdout (in addition to evidence files). |
 
-Color Coding:
+---
 
-    🔴 Red	Confirmed vulnerability or sensitive result
-    🟢 Green	No issue / resolved / blocked
-    🔵 Blue	Informational or warning
-    ⚪ White	Evidence, data dump, or debug info
-    🟠 Orange	(Planned for future use — Medium/Caution)
+## Output & Evidence
 
+- Terminal output is **colorized** with quick pass/fail signals and timing.  
+- Verified findings are persisted to `./evidence/` as:  
+  - `1-HIGH-<slug>-<idx>.json` / `.txt`  
+  - `2-MEDIUM-<slug>-<idx>.json` / `.txt`  
+  - `3-LOW-<slug>-<idx>.json` / `.txt`
 
-Severity Levels:
+Each evidence file includes:
+- Metadata (HTTP status, latency, content type)  
+- Sanitized fragment/evidence (errors, schema sample, etc.)  
+- `verify_curl`: a ready-to-run, heredoc-based `curl` reproducer  
+- Raw JSON (pretty-printed when applicable)
 
-    Info (Green)
-    Low (Blue)
-    Medium (Orange)
-    High (Red)
-    Critical (Violet – reserved for future additions)
+> INFO items are printed to the console for context but not written to evidence.
 
+---
+
+## Severity Model
+
+- **HIGH / MEDIUM / LOW**: persisted only if verification passes.  
+- **INFO**: contextual breadcrumbs (not persisted).  
+
+Smart triage rejects verified output that indicates WAF blocks or explicit mitigations (e.g., “maximum query complexity”, “depth limit”, “batching not supported”).
+
+---
+
+## Safety
+
+- The suite uses single requests for pressure tests, moderate sizes, and caps on depth/aliases/fragments to avoid service disruption.  
+- No parallel flooding; no intentional DoS.  
+- If the target returns clear mitigation messages or WAF blocks, the item is treated as **non-finding**.
+
+---
 
 ## Contributing
 
-    More checks and modules (e.g., mutation introspection, relay abuse) are planned. Feel free to fork and contribute enhancements or bugfixes.
+Planned enhancements include mutation abuse probes, Relay-specific checks, persisted query hardening, and more nuanced cost modeling. PRs are welcome — tests and reproducible evidence payloads appreciated.
 
+---
 
-## Legal & Ethical Notice
+## Legal & Ethical Notice
 
-    This script is provided for educational and ethical hacking use cases only. Do not run it against systems you do not own or have explicit authorization to test. Misuse of this tool can result in criminal charges. The authors take no responsibility for illegal or unethical use.
+This tool is for **educational and authorized security testing** only. Do not target systems without explicit permission. Misuse can be illegal. The authors disclaim liability for improper use.
