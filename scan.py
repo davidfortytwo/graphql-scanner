@@ -620,7 +620,7 @@ def check_deprecated_fields(url, headers, timeout, verify_tls, findings):
     payload = {'query': '{ __type(name:"Query"){ fields(includeDeprecated:true){ name isDeprecated deprecationReason } } }'}
     code, hdrs, data, raw, tt = post_json(url, payload, headers, timeout, verify_tls)
     name = "Deprecated field enumeration"
-    fields = data and data.get("data", {}).get("__type", {}).get("fields") or []
+    fields = data and ((data.get("data") or {}).get("__type") or {}).get("fields") or []
     deprecated = [f for f in fields if f.get("isDeprecated")]
     if deprecated:
         print_result(False, f"{name}: found {len(deprecated)} deprecated fields")
