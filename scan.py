@@ -56,6 +56,62 @@ def sh_quote(s: str) -> str:
     return "'" + (s.replace("'", "'\"'\"'")) + "'"
 
 
+# ---------------------------
+# Secret redaction for persisted evidence
+# ---------------------------
+
+REDACTED = "<redacted>"
+
+SENSITIVE_HEADER_NAMES = frozenset({
+    "authorization", "proxy-authorization", "www-authenticate", "proxy-authenticate",
+    "cookie", "set-cookie", "authentication", "password", "proxy-authenticate",
+    "x-api-key", "api-key", "apikey", "x-auth-token", "x-access-token",
+    "x-amz-security-token", "x-csrf-token", "x-xsrf-token", "private-token",
+    "x-session-id", "session-id",
+})
+
+SENSITIVE_HEADER_SUBSTRINGS = ("authorization", "api-key", "api_key", "apikey", "token", "secret", "password", "cookie", "session")
+
+# Matches a sh_quote()-produced single-quoted token, including the '"'"' escape.
+_SHQ_TOKEN = r"'(?:[^']|'\"'\"')*'"
+_CURL_HEADER_RE = re.compile(r"(-H[ \t]+)(" + _SHQ_TOKEN + r")")
+
+
+def is_sensitive_header(name: str) -> bool:
+    """True when a header name is known or suspected to carry a credential."""
+    n = (name or "").strip().lower()
+    if not n:
+        return False
+    if n in SENSITIVE_HEADER_NAMES:
+        return True
+    return any(tok in n for tok in SENSITIVE_HEADER_SUBSTRINGS)
+
+
+def _unshq(tok: str) -> str:
+    """Inverse of sh_quote() for a single-quoted shell token."""
+    return tok[1:-1].replace("'\"'\"'", "'")
+
+
+def redact_curl_secrets(curl: str) -> str:
+    """Replace secret-bearing header VALUES inside a curl command string.
+
+    Applied ONLY to the copy persisted into evidence/*.json and evidence/*.txt.
+    The command string passed to run_curl_verify() is left untouched, so the
+    scanner still reproduces findings with real credentials and the operator's
+    copy/paste command keeps working against their own endpoint.
+    """
+    if not curl:
+        return curl
+
+    def _sub(m):
+        name, sep, _value = _unshq(m.group(2)).partition(":")
+        if sep and is_sensitive_header(name):
+            return m.group(1) + sh_quote(f"{name.strip()}: {REDACTED}")
+        return m.group(0)
+
+    return _CURL_HEADER_RE.sub(_sub, curl)
+
+
 def ensure_evidence_dir():
     if not os.path.exists(EVIDENCE_DIR):
         os.makedirs(EVIDENCE_DIR, exist_ok=True)
@@ -475,7 +531,7 @@ def report_finding(findings, name, severity, *, evidence_obj=None, raw_text=None
         "fragment": (fragment or extract_fragment_from_evidence(evidence_obj) or (raw_text or ""))[:4000],
         "evidence": evidence_obj if evidence_obj is not None else {},
         "raw": raw_text,
-        "verify_curl": verify_curl or ""
+        "verify_curl": redact_curl_secrets(verify_curl) if verify_curl else ""
     }
 
     idx = len(findings)
